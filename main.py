@@ -3,8 +3,38 @@ import mediapipe as mp
 import numpy as np
 from mediapipe.python.solutions.drawing_utils import DrawingSpec
 
+import time
+import rtmidi
+
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
+
+# Create a MIDI output port
+midiout = rtmidi.MidiOut()
+available_ports = midiout.get_ports()
+
+if available_ports:
+    midiout.open_port(0)  # Open the first available port
+else:
+    midiout.open_virtual_port("My Virtual MIDI Port")
+
+
+def send_midi_message(note, velocity, duration):
+    # Note On message
+    note_on = [0x90, note, velocity]  # 0x90 is the Note On status byte
+    midiout.send_message(note_on)
+    time.sleep(duration)
+
+    # Note Off message
+    note_off = [0x80, note, 0]  # 0x80 is the Note Off status byte
+    midiout.send_message(note_off)
+
+
+def send_tremolo_message(tremolo_depth):
+    # Tremolo message
+    tremolo_cc = [0xB0, 92, tremolo_depth]  # 0xB0 is the CC status byte, 92 is the tremolo CC number
+    midiout.send_message(tremolo_cc)
+
 
 TEXT_COLOR = (0, 255, 0)
 FONT_SIZE = 1.5
@@ -73,24 +103,20 @@ def calculate_eye_openness(landmarks, eye_indices):
     eye_openness = eye_height / (eye_width)
     return np.clip(eye_openness, 0.0, 1.0)
 
-def calculate_eye_openness_2(landmarks, eye_indices):
-    eye_points = np.array([(landmarks[idx].x, landmarks[idx].y) for idx in eye_indices])
-    eye_vertical_indices = [1, 2, 4, 5]
-    eye_vertical_points = eye_points[eye_vertical_indices]
-    eye_height = np.linalg.norm(eye_vertical_points[0] - eye_vertical_points[1]) + \
-                 np.linalg.norm(eye_vertical_points[2] - eye_vertical_points[3])
-    eye_width = np.linalg.norm(eye_points[0] - eye_points[3])
+def calculate_eye_openness_2(landmarks, eye_type):
+    face_size = landmarks[10].y - landmarks[175].y
+    MAX_EYE_OPEN_SIZE = 0.04 * face_size
+    COMPENSATE = 0.4
 
-    left_eye_height = landmarks[144].y - landmarks[160].y # ~= landmarks[158].y - landmarks[153].y
-    left_eye_width = landmarks[158].x - landmarks[160].x # ~= 153.x - 144.x
+    if eye_type == "left":
+        left_eye_height = landmarks[160].y - landmarks[144].y - (MAX_EYE_OPEN_SIZE * COMPENSATE) # ~= landmarks[158].y - landmarks[153].y
+        eye_openness = left_eye_height / MAX_EYE_OPEN_SIZE
+    elif eye_type == "right":
+        right_eye_height = landmarks[386].y - landmarks[374].y - (MAX_EYE_OPEN_SIZE * COMPENSATE) # ~= landmarks[158].y - landmarks[153].y
+        eye_openness = right_eye_height / MAX_EYE_OPEN_SIZE
 
-    # face_size = landmarks[10].y - landmarks[175].y
-    # MAX_EYE_OPEN_SIZE = 0.02 * face_size
-
-    # eye_openness = left_eye_height / left_eye_width
-    # eye_openness = left_eye_height / MAX_EYE_OPEN_SIZE
-    # return np.clip(eye_openness, 0.0, 1.0)
-    return landmarks[144].y
+    # return eye_openness
+    return np.clip(eye_openness, 0.0, 1.0)
 
 # Initialize MediaPipe Face Mesh
 with mp_face_mesh.FaceMesh(
@@ -143,8 +169,8 @@ with mp_face_mesh.FaceMesh(
                 # Calculate eye openness for left and right eyes
                 # left_eye_openness = calculate_eye_openness(face_landmarks.landmark, LEFT_EYE_INDICES)
                 # right_eye_openness = calculate_eye_openness(face_landmarks.landmark, RIGHT_EYE_INDICES)
-                left_eye_openness = calculate_eye_openness_2(face_landmarks.landmark, LEFT_EYE_INDICES)
-                right_eye_openness = calculate_eye_openness_2(face_landmarks.landmark, RIGHT_EYE_INDICES)
+                left_eye_openness = calculate_eye_openness_2(face_landmarks.landmark, "left")
+                right_eye_openness = calculate_eye_openness_2(face_landmarks.landmark, "right")
 
                 # Draw the eyebrow extension, smiledness, mouth openness, and eye openness values on the frame
                 cv2.putText(frame, f"Left Eyebrow Extension: {left_extension:.1f}", (10, int(30 * FONT_SIZE)),
@@ -155,11 +181,16 @@ with mp_face_mesh.FaceMesh(
                             cv2.FONT_HERSHEY_SIMPLEX, FONT_SIZE, TEXT_COLOR, 2)
                 cv2.putText(frame, f"Mouth Openness: {mouth_openness:.1f}", (10, int(120 * FONT_SIZE)),
                             cv2.FONT_HERSHEY_SIMPLEX, FONT_SIZE, TEXT_COLOR, 2)
-                # cv2.putText(frame, f"Left Eye Openness: {left_eye_openness:.1f}", (10, int(150 * FONT_SIZE)),
-                cv2.putText(frame, f"Left Eye Openness: {left_eye_openness}", (10, int(150 * FONT_SIZE)),
+                cv2.putText(frame, f"Left Eye Openness: {left_eye_openness:.1f}", (10, int(150 * FONT_SIZE)),
+                # cv2.putText(frame, f"Left Eye Openness: {left_eye_openness}", (10, int(150 * FONT_SIZE)),
                             cv2.FONT_HERSHEY_SIMPLEX, FONT_SIZE, TEXT_COLOR, 2)
                 cv2.putText(frame, f"Right Eye Openness: {right_eye_openness:.1f}", (10, int(180 * FONT_SIZE)),
                             cv2.FONT_HERSHEY_SIMPLEX, FONT_SIZE, TEXT_COLOR, 2)
+
+                if mouth_openness > 0.5:
+                    send_tremolo_message(int(255*mouth_openness))
+                else:
+                    send_tremolo_message(int(0))
 
         # Display the frame
         cv2.imshow('Facial Analysis', frame)
